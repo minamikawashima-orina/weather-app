@@ -10,6 +10,7 @@ import SearchForm from "./SearchForm";
 import WeatherSummary from "./WeatherSummary";
 import ForecastCalendar from "./ForecastCalendar";
 import HourlyForecast from "./HourlyForecast";
+import WeatherAlerts from "./WeatherAlerts";
 
 const DEFAULT_CITY = "Tokyo"; // 最初に表示する都市
 
@@ -95,6 +96,8 @@ export default function WeatherApp() {
       {/* 天気の表示（検索中は少し薄くする） */}
       {weather && selectedDay && (
         <div className={`flex flex-col gap-4 transition-opacity ${loading ? "opacity-50" : ""}`}>
+          {/* 天気に合わせた注意メッセージ（選んだ日に連動して切り替わる） */}
+          <WeatherAlerts day={selectedDay} />
           <WeatherSummary
             cityName={`${weather.city.name}（${weather.city.country}）`}
             day={selectedDay}
