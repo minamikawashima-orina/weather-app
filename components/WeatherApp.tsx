@@ -11,6 +11,7 @@ import WeatherSummary from "./WeatherSummary";
 import ForecastCalendar from "./ForecastCalendar";
 import HourlyForecast from "./HourlyForecast";
 import WeatherAlerts from "./WeatherAlerts";
+import ClothingAdvice from "./ClothingAdvice";
 
 const DEFAULT_CITY = "Tokyo"; // 最初に表示する都市
 
@@ -100,6 +101,11 @@ export default function WeatherApp() {
           <WeatherAlerts day={selectedDay} />
           <WeatherSummary
             cityName={`${weather.city.name}（${weather.city.country}）`}
+            day={selectedDay}
+            current={selectedDay.date === weather.today ? weather.current : null}
+          />
+          {/* 選んだ日の気温に合わせた服装アドバイス（選んだ日に連動して切り替わる） */}
+          <ClothingAdvice
             day={selectedDay}
             current={selectedDay.date === weather.today ? weather.current : null}
           />
