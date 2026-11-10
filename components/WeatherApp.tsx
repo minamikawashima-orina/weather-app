@@ -12,6 +12,7 @@ import ForecastCalendar from "./ForecastCalendar";
 import HourlyForecast from "./HourlyForecast";
 import WeatherAlerts from "./WeatherAlerts";
 import ClothingAdvice from "./ClothingAdvice";
+import FavoriteCities from "./FavoriteCities";
 
 const DEFAULT_CITY = "Tokyo"; // 最初に表示する都市
 
@@ -41,17 +42,20 @@ export default function WeatherApp() {
   const [selectedDate, setSelectedDate] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // 今表示している天気を検索したときの文字（お気に入り登録で使う。例: "大阪"）
+  const [searchedQuery, setSearchedQuery] = useState("");
 
   // 何回目のリクエストかを覚えておき、古い結果で画面が上書きされないようにする
   const requestId = useRef(0);
 
   /** 取得結果を画面の状態に反映する */
-  function applyResult(result: FetchResult, id: number) {
+  function applyResult(result: FetchResult, id: number, query: string) {
     if (id !== requestId.current) return; // 新しい検索が始まっていたら無視
     if ("error" in result) {
       setError(result.error);
     } else {
       setWeather(result.data);
+      setSearchedQuery(query);
       setSelectedDate(result.data.today); // 検索したら「今日」を選んだ状態にする
       setError("");
     }
@@ -61,14 +65,14 @@ export default function WeatherApp() {
   // 最初に画面が表示されたときに、東京の天気を取得する
   useEffect(() => {
     const id = ++requestId.current;
-    fetchWeather(DEFAULT_CITY).then((result) => applyResult(result, id));
+    fetchWeather(DEFAULT_CITY).then((result) => applyResult(result, id, DEFAULT_CITY));
   }, []);
 
-  // 検索ボタンが押されたとき
+  // 検索ボタン、またはお気に入りの都市が押されたとき
   function handleSearch(city: string) {
     const id = ++requestId.current;
     setLoading(true);
-    fetchWeather(city).then((result) => applyResult(result, id));
+    fetchWeather(city).then((result) => applyResult(result, id, city));
   }
 
   const selectedDay = weather?.days.find((day) => day.date === selectedDate);
@@ -81,6 +85,16 @@ export default function WeatherApp() {
       </header>
 
       <SearchForm onSearch={handleSearch} loading={loading} />
+
+      {/* お気に入り都市（☆登録ボタンと一覧） */}
+      <FavoriteCities
+        currentCity={
+          weather
+            ? { name: weather.city.name, country: weather.city.country, query: searchedQuery }
+            : null
+        }
+        onSelect={handleSearch}
+      />
 
       {/* エラーメッセージ */}
       {error && (
