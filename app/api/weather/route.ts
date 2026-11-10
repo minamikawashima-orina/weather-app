@@ -1,5 +1,10 @@
 // 天気情報を取得する API Route です。
-// ブラウザから「/api/weather?city=Tokyo」のように呼び出されます。
+// ブラウザから「/api/weather?city=Tokyo」や「/api/weather?city=大阪」のように呼び出されます。
+//
+// ★日本語の都市名について
+// OpenWeather の天気APIは「大阪」のような日本語名を直接受け付けません。
+// そこで日本語で入力されたときは、先に Geocoding API で緯度・経度を調べてから
+// その緯度・経度で天気を取得します。英語名（Tokyo など）は今までどおり直接検索します。
 //
 // ★ポイント
 // このファイルはサーバー側だけで動くため、APIキー（OPENWEATHER_API_KEY）が
@@ -15,6 +20,7 @@ import type {
 } from "@/lib/types";
 
 const BASE_URL = "https://api.openweathermap.org/data/2.5";
+const GEO_URL = "https://api.openweathermap.org/geo/1.0";
 
 // ---- OpenWeather から返ってくるデータの形（使う項目だけ） ----
 
@@ -41,6 +47,28 @@ type OwmForecastResponse = {
   city: { timezone: number };
 };
 
+/** Geocoding API の検索結果 1件分 */
+type OwmGeoResult = {
+  name: string; // 英語名（例: "Osaka"）
+  local_names?: Record<string, string>; // 各言語での名前（例: { ja: "大阪市" }）
+  lat: number; // 緯度
+  lon: number; // 経度
+  country: string; // 国コード（例: "JP"）
+};
+
+/** 天気を検索するための情報（都市名で探すか、緯度・経度で探すか） */
+type SearchTarget = {
+  params: Record<string, string>; // 例: { q: "Tokyo" } または { lat: "34.69", lon: "135.5" }
+  city?: { name: string; country: string }; // 画面に出す都市名（日本語検索のときだけ）
+};
+
+/** OpenWeather からエラーのステータスコードが返ってきたことを表すエラー */
+class OwmStatusError extends Error {
+  constructor(public status: number) {
+    super(`OpenWeather status ${status}`);
+  }
+}
+
 // ---- メイン処理 ----
 
 export async function GET(request: NextRequest) {
@@ -63,23 +91,39 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // 3. OpenWeather に「現在の天気」と「5日間予報」を同時にリクエストする
-  //    units=metric → 気温を℃で取得 / lang=ja → 天気の説明を日本語で取得
-  const params = new URLSearchParams({
-    q: city,
-    appid: apiKey,
-    units: "metric",
-    lang: "ja",
-  });
-
+  let target: SearchTarget | null;
   let currentRes: Response;
   let forecastRes: Response;
   try {
+    // 3. 検索のしかたを決める
+    //    日本語 → Geocoding API で緯度・経度を調べる / 英語 → 都市名でそのまま検索
+    target = containsJapanese(city)
+      ? await findCityByJapaneseName(city, apiKey)
+      : { params: { q: city } };
+
+    if (target === null) {
+      return notFoundResponse(city);
+    }
+
+    // 4. OpenWeather に「現在の天気」と「5日間予報」を同時にリクエストする
+    //    units=metric → 気温を℃で取得 / lang=ja → 天気の説明を日本語で取得
+    const params = new URLSearchParams({
+      ...target.params,
+      appid: apiKey,
+      units: "metric",
+      lang: "ja",
+    });
+
     [currentRes, forecastRes] = await Promise.all([
       fetch(`${BASE_URL}/weather?${params}`),
       fetch(`${BASE_URL}/forecast?${params}`),
     ]);
-  } catch {
+  } catch (error) {
+    // Geocoding API がエラーを返した場合
+    if (error instanceof OwmStatusError) {
+      console.error(`OpenWeather Geocoding からエラーが返されました (status: ${error.status})`);
+      return errorFromStatus(error.status, city);
+    }
     // ネットに繋がらないなど（URLにAPIキーが含まれるため、エラー内容はログに出さない）
     console.error("OpenWeather への接続に失敗しました");
     return errorResponse(
@@ -88,19 +132,81 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // 4. エラーの場合は、わかりやすいメッセージを返す
+  // 5. エラーの場合は、わかりやすいメッセージを返す
   if (!currentRes.ok || !forecastRes.ok) {
     const status = !currentRes.ok ? currentRes.status : forecastRes.status;
     console.error(`OpenWeather からエラーが返されました (status: ${status})`);
     return errorFromStatus(status, city);
   }
 
-  // 5. 受け取ったデータを、画面で使いやすい形に変換して返す
+  // 6. 受け取ったデータを、画面で使いやすい形に変換して返す
   const current: OwmCurrentResponse = await currentRes.json();
   const forecast: OwmForecastResponse = await forecastRes.json();
 
   const data: WeatherData = buildWeatherData(current, forecast);
+  // 日本語で検索したときは、Geocoding で見つけた日本語の都市名（例: 大阪市）を表示する
+  if (target.city) {
+    data.city = target.city;
+  }
   return Response.json(data);
+}
+
+// ---- 日本語の都市名から場所を探す関数 ----
+
+/** ひらがな・カタカナ・漢字・ハングルが含まれているか（＝日本語などで入力されたか） */
+function containsJapanese(text: string) {
+  return /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uff66-\uff9f\uac00-\ud7af]/.test(text);
+}
+
+/**
+ * 日本語の都市名から、Geocoding API で場所（緯度・経度）を探します。
+ * 見つからなければ null を返します。
+ *
+ * 例:「名古屋」をそのまま検索すると、同じ名前の小さな地区が先に出てくることがあります。
+ * そこで「名古屋」と「名古屋市」の両方で検索し、日本語名が「名古屋市」と一致するものを優先します。
+ */
+async function findCityByJapaneseName(
+  city: string,
+  apiKey: string,
+): Promise<SearchTarget | null> {
+  // すでに「〇〇市」と入力されていれば、「市」を付け足さない
+  // ※「京都」のように最後が「都」でも市の名前の場合があるので、判定は「市」だけにしています
+  const endsWithCity = city.endsWith("市");
+
+  // 検索する文字列の候補（例: 「大阪」→「大阪」「大阪市」）
+  const queries = endsWithCity ? [city] : [city, `${city}市`];
+  const resultLists = await Promise.all(queries.map((query) => geocode(query, apiKey)));
+  const results = resultLists.flat();
+
+  // 優先したい日本語名の順番（例: 大阪市 → 大阪都 → 大阪府 → 大阪県 → 大阪）
+  const preferredNames = endsWithCity
+    ? [city]
+    : [`${city}市`, `${city}都`, `${city}府`, `${city}県`, city];
+
+  let found: OwmGeoResult | undefined;
+  for (const name of preferredNames) {
+    found = results.find((place) => place.local_names?.ja === name);
+    if (found) break;
+  }
+  // 名前がぴったり一致しなくても、結果があれば一番最初のものを使う（例: 外国の都市）
+  found ??= results[0];
+
+  if (!found) return null;
+
+  return {
+    params: { lat: String(found.lat), lon: String(found.lon) },
+    city: { name: found.local_names?.ja ?? found.name, country: found.country },
+  };
+}
+
+/** Geocoding API で、都市名から場所の候補（最大5件）を取得します */
+async function geocode(query: string, apiKey: string): Promise<OwmGeoResult[]> {
+  const params = new URLSearchParams({ q: query, limit: "5", appid: apiKey });
+  const res = await fetch(`${GEO_URL}/direct?${params}`);
+  if (!res.ok) {
+    throw new OwmStatusError(res.status);
+  }
+  return res.json();
 }
 
 // ---- エラー用の関数 ----
@@ -110,14 +216,19 @@ function errorResponse(message: string, status: number) {
   return Response.json(body, { status });
 }
 
+/** 都市が見つからなかったときのエラー */
+function notFoundResponse(city: string) {
+  return errorResponse(
+    `「${city}」という都市が見つかりませんでした。都市名のつづりを確認してください（例: 大阪、東京、Osaka、Tokyo）。`,
+    404,
+  );
+}
+
 /** OpenWeather のステータスコードに応じてメッセージを決める */
 function errorFromStatus(status: number, city: string) {
   switch (status) {
     case 404:
-      return errorResponse(
-        `「${city}」という都市が見つかりませんでした。英語表記（例: Tokyo, Osaka）で入力してみてください。`,
-        404,
-      );
+      return notFoundResponse(city);
     case 401:
       return errorResponse(
         "APIキーが正しくないか、まだ有効になっていません。.env.local を確認してください。",
